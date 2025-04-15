@@ -3,7 +3,7 @@ import torchvision.transforms as T
 
 class SemiSupervised:
     @staticmethod
-    def generate_pseudo_labels(model, unlabeled_data, K, temperature=0.5, epoch=0, total_epochs=20):
+    def generate_pseudo_labels(model, unlabeled_datas, num_weak_aug_rounds, num_classes, temperature=0.5, epoch=0, total_epochs=20):
         # 置信度阈值过滤
         model.eval()
         with torch.no_grad():
@@ -16,19 +16,21 @@ class SemiSupervised:
             # 对每次弱增强，计算其概率分布
             # 最后通过加权平均得到其概率分布
             # 选择最大的概率作为其伪标签
-            weak_view = unlabeled_data
-            batch_size = unlabeled_data.size(0)
-            total_probs = torch.zeros(batch_size, model.num_classes).to(unlabeled_data.device)
+            batch_size = unlabeled_datas.size(0)
+            device = unlabeled_datas.device
+            total_probs = torch.zeros(batch_size, num_classes).to(device)
+            weak_view = unlabeled_datas
 
-            for i in range(K):
-                weak_view = weak_aug(weak_view)
+            for i in range(num_weak_aug_rounds):
+                weak_view = torch.stack([weak_aug(img) for img in weak_view])
                 logits = model(weak_view)
-                probs = torch.softmax(logits, dim=1)
-                total_probs += 2 * (K - i + 1) / (K * (K + 1)) * probs
+                probs = torch.softmax(logits / temperature, dim=1)
+                weight = 2 * (num_weak_aug_rounds - i + 1) / (num_weak_aug_rounds * (num_weak_aug_rounds + 1))
+                total_probs += weight * probs
 
             max_probs, pseudo_labels = torch.max(total_probs, dim=1)
             mask = max_probs >= threshold
-            return pseudo_labels, mask
+            return pseudo_labels[mask], unlabeled_datas[mask]
 
     @staticmethod
     def consistency_loss(logits1, logits2, method='KL'):
