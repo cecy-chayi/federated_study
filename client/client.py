@@ -79,7 +79,7 @@ class Client:
                         )
 
                     pseudo_count = filtered_data.size(0)
-                    logging.info(f"[Client {self.client_id}][Epoch {epoch}] Pseudo labels used: {pseudo_count}")
+                    # logging.info(f"[Client {self.client_id}][Epoch {epoch}] Pseudo labels used: {pseudo_count}")
 
                     if pseudo_count > 0:
                         # 修复 RandAugment 输入类型问题
@@ -87,6 +87,7 @@ class Client:
                             self.strong_aug((img * 255).to(torch.uint8)).float() / 255.0
                             for img in filtered_data
                         ]).to(self.device)
+                        strong_augmented.requires_grad_(True)
 
                         logits_strong = model(strong_augmented)
                         loss_unsup = F.cross_entropy(logits_strong, pseudo_labels)
