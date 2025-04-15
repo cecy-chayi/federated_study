@@ -5,10 +5,11 @@ from torchvision import transforms
 
 from client.dataset import FederatedDataset
 from models.semisup import SemiSupervised
+import logging
 
 
 class Client:
-    def __init__(self, client_id, data_dir):
+    def __init__(self, client_id, data_dir, batch_size):
         self.client_id = client_id
         self.device = torch.device("cuda" if torch.cuda.is_available() else "")
         self.train_loss = []
@@ -17,7 +18,7 @@ class Client:
             f"{data_dir}/train/labeled/data.pt",
             f"{data_dir}/train/unlabeled/data.pt"
         )
-        self.loader = DataLoader(dataset, batch_size=64, shuffle=True)
+        self.loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
         # 增强策略
         # 随机水平翻转（50%概率）
@@ -36,7 +37,7 @@ class Client:
             transforms.Lambda(lambda x: x.to(self.device))
         ])
 
-    def train(self, global_model, epochs, K, lr=0.001):
+    def train(self, global_model, epochs, num_classes, num_weak_aug_rounds, lr=0.001):
         model = copy.deepcopy(global_model).to(self.device)
         # L2正则防止客户端过拟合
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -55,44 +56,56 @@ class Client:
                 labeled_mask = (labels != -1)
                 unlabeled_mask = (labels == -1)
 
-                loss_sup = torch.tensor(0.0, device=self.device, requires_grad=True)
-                loss_unsup = torch.tensor(0.0, device=self.device, requires_grad=True)
+                loss_sup = None
+                loss_unsup = None
 
+                # 有监督损失
                 if torch.any(labeled_mask):
                     labeled_images = images[labeled_mask]
                     labeled_labels = labels[labeled_mask]
                     logits = model(labeled_images)
                     loss_sup = torch.nn.functional.cross_entropy(logits, labeled_labels)
 
+                # 无监督损失
                 if torch.any(unlabeled_mask):
                     unlabeled_images = images[unlabeled_mask]
+                    # 生成伪标签
                     with torch.no_grad():
-                        
-                        pseudo_labels, filtered_data = SemiSupervised.generate_pseudo_labels(model,
-                                                                                             unlabeled_images,
-                                                                                             K,
-                                                                                             epoch=epoch,
-                                                                                             total_epochs=epochs)
-                        if filtered_data.size(0) > 0:
-                            # # 确保数据维度正确 [C, H, W]
-                            # if filtered_data.shape[1] != 3:
-                            #     filtered_data = filtered_data.permute(0, 3, 1, 2)
+                        pseudo_labels, filtered_datas = SemiSupervised.generate_pseudo_labels(
+                                model,
+                                unlabeled_datas=unlabeled_images,
+                                num_weak_aug_rounds=num_weak_aug_rounds,
+                                num_classes=num_classes,
+                                epoch=epoch,
+                                total_epochs=epochs
+                        )
 
-                            strong_augmented = self.strong_aug(filtered_data)
-                            logits_weak = model(filtered_data)
+                        logging.info(
+                            f"[Client {self.client_id}][Epoch {epoch}] Pseudo labels used: {filtered_datas.size(0)}")
+                        if filtered_datas.size(0) > 0:
+                            # 确保数据维度正确 [B, C, H, W]
+
+                            # strong_augmented = self.strong_aug(filtered_datas)
+                            strong_augmented = torch.stack([self.strong_aug(img) for img in filtered_datas])
                             logits_strong = model(strong_augmented)
-                            loss_unsup = SemiSupervised.consistency_loss(logits_weak, logits_strong.detach())
+                            loss_unsup = torch.nn.functional.cross_entropy(logits_strong, pseudo_labels)
 
-                # unsupervised_weight = 0.5 * (1 - epoch / epochs)
-                # unsupervised_weight = 0.5 * (0.5 + 0.5 * (1 - epoch / epochs))
-                unsupervised_weight = 0.5
-                total_loss = loss_sup + unsupervised_weight * loss_unsup
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-                epoch_loss += total_loss.item()
+                total_loss = 0.0
+                if loss_sup is not None:
+                    total_loss += loss_sup
+                if loss_unsup is not None:
+                    total_loss += 0.5 * loss_unsup
+
+                if isinstance(total_loss, float):
+                    print(f"[Epoch {epoch}] Warning: total_loss is float, skipping backward.")
+                    continue
 
                 optimizer.zero_grad()
                 total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
                 optimizer.step()
+
+                epoch_loss += total_loss.item()
             self.train_loss.append(epoch_loss / len(self.loader))
             scheduler.step()
 

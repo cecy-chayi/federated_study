@@ -4,8 +4,8 @@ from torchvision.models import resnet18
 
 
 class Server:
-    def __init__(self, num_clients):
-        self.global_model = resnet18(num_classes=10)
+    def __init__(self, num_clients, num_classes):
+        self.global_model = resnet18(num_classes=num_classes)
         self.global_model.conv1 = torch.nn.Conv2d(
             in_channels=3,
             out_channels=64,

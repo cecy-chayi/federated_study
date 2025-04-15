@@ -22,7 +22,7 @@ def main():
     with open('config/config.yaml', 'r') as f:
         config = yaml.safe_load(f)
 
-    server = Server(config["num_clients"])
+    server = Server(config["num_clients"], config["num_classes"])
     device = next(server.global_model.parameters()).device
 
     test_data = torch.load(config["test_folder"], weights_only=False)
@@ -39,8 +39,12 @@ def main():
         client_weights = []
         round_losses = []
         for client_id in range(config["num_clients"]):
-            client = Client(client_id, config["data_folder"])
-            weights, losses = client.train(copy.deepcopy(server.global_model), config["local_epochs"])
+            client = Client(client_id, config["data_folder"], config["batch_size"])
+            weights, losses = client.train(copy.deepcopy(server.global_model),
+                                           config["local_epochs"],
+                                           config["num_classes"],
+                                           config["num_weak_aug_rounds"]
+                                           )
             client_weights.append(weights)
             round_losses.extend(losses)
 
@@ -55,8 +59,6 @@ def main():
         torch.save(client_loss_history, f)
     with open("server_acc_history.pkl", "wb") as f:
         torch.save(server_acc_history, f)
-
-
 
 
 if __name__ == "__main__":
