@@ -5,6 +5,7 @@ from torchvision import transforms
 
 from client.dataset import FederatedDataset
 from models.semisup import SemiSupervised
+import torch.nn.functional as F
 import logging
 
 
@@ -39,16 +40,13 @@ class Client:
 
     def train(self, global_model, epochs, num_classes, num_weak_aug_rounds, lr=0.001):
         model = copy.deepcopy(global_model).to(self.device)
-        # L2正则防止客户端过拟合
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
-
-        # 学习率递减
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: min(e / epochs, 1.0))
         model.train()
 
         for epoch in range(epochs):
             epoch_loss = 0.0
+
             for images, labels in self.loader:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
@@ -64,41 +62,47 @@ class Client:
                     labeled_images = images[labeled_mask]
                     labeled_labels = labels[labeled_mask]
                     logits = model(labeled_images)
-                    loss_sup = torch.nn.functional.cross_entropy(logits, labeled_labels)
+                    loss_sup = F.cross_entropy(logits, labeled_labels)
 
                 # 无监督损失
                 if torch.any(unlabeled_mask):
                     unlabeled_images = images[unlabeled_mask]
-                    # 生成伪标签
+
                     with torch.no_grad():
-                        pseudo_labels, filtered_datas = SemiSupervised.generate_pseudo_labels(
-                                model,
-                                unlabeled_datas=unlabeled_images,
-                                num_weak_aug_rounds=num_weak_aug_rounds,
-                                num_classes=num_classes,
-                                epoch=epoch,
-                                total_epochs=epochs
+                        pseudo_labels, filtered_data = SemiSupervised.generate_pseudo_labels(
+                            model=model,
+                            unlabeled_datas=unlabeled_images,
+                            num_weak_aug_rounds=num_weak_aug_rounds,
+                            num_classes=num_classes,
+                            epoch=epoch,
+                            total_epochs=epochs
                         )
 
-                        logging.info(
-                            f"[Client {self.client_id}][Epoch {epoch}] Pseudo labels used: {filtered_datas.size(0)}")
-                        if filtered_datas.size(0) > 0:
-                            # 确保数据维度正确 [B, C, H, W]
+                    pseudo_count = filtered_data.size(0)
+                    logging.info(f"[Client {self.client_id}][Epoch {epoch}] Pseudo labels used: {pseudo_count}")
 
-                            # strong_augmented = self.strong_aug(filtered_datas)
-                            strong_augmented = torch.stack([self.strong_aug(img) for img in filtered_datas])
-                            logits_strong = model(strong_augmented)
-                            loss_unsup = torch.nn.functional.cross_entropy(logits_strong, pseudo_labels)
+                    if pseudo_count > 0:
+                        # 修复 RandAugment 输入类型问题
+                        strong_augmented = torch.stack([
+                            self.strong_aug((img * 255).to(torch.uint8)).float() / 255.0
+                            for img in filtered_data
+                        ]).to(self.device)
 
-                total_loss = 0.0
+                        logits_strong = model(strong_augmented)
+                        loss_unsup = F.cross_entropy(logits_strong, pseudo_labels)
+
+                # 计算总损失
+                losses = []
                 if loss_sup is not None:
-                    total_loss += loss_sup
+                    losses.append(loss_sup)
                 if loss_unsup is not None:
-                    total_loss += 0.5 * loss_unsup
+                    losses.append(0.5 * loss_unsup)
 
-                if isinstance(total_loss, float):
-                    print(f"[Epoch {epoch}] Warning: total_loss is float, skipping backward.")
+                if len(losses) == 0:
+                    logging.warning(f"[Client {self.client_id}][Epoch {epoch}] No valid loss. Skipping batch.")
                     continue
+
+                total_loss = sum(losses)
 
                 optimizer.zero_grad()
                 total_loss.backward()
@@ -106,13 +110,8 @@ class Client:
                 optimizer.step()
 
                 epoch_loss += total_loss.item()
+
             self.train_loss.append(epoch_loss / len(self.loader))
             scheduler.step()
 
         return model.state_dict(), self.train_loss
-
-    def cleanup(self):
-        del self.loader.dataset
-        del self.loader
-        if hasattr(self, 'model'):
-            del self.model
