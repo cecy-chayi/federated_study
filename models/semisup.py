@@ -3,40 +3,32 @@ import torchvision.transforms as T
 
 class SemiSupervised:
     @staticmethod
-    def generate_pseudo_labels(model, unlabeled_data, temperature=0.5, epoch=0, total_epochs=20):
+    def generate_pseudo_labels(model, unlabeled_data, K, temperature=0.5, epoch=0, total_epochs=20):
         # 置信度阈值过滤
         model.eval()
         with torch.no_grad():
-            threshold = 0.75 + 0.2 * (1 - epoch / total_epochs)
+            threshold = 0.7 + 0.2 * (1 - epoch / total_epochs)
             weak_aug = T.Compose([
                 T.RandomHorizontalFlip(p=0.5),
                 T.RandomCrop(size=32, padding=4)
             ])
-            strong_aug = T.Compose([
-                T.RandomHorizontalFlip(p=0.5),
-                T.RandomCrop(size=32, padding=4),
-                T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-                T.RandomGrayscale(p=0.2)
-            ])
 
-            weak_view = weak_aug(unlabeled_data)
-            strong_view = strong_aug(unlabeled_data)
+            # 对每次弱增强，计算其概率分布
+            # 最后通过加权平均得到其概率分布
+            # 选择最大的概率作为其伪标签
+            weak_view = unlabeled_data
+            batch_size = unlabeled_data.size(0)
+            total_probs = torch.zeros(batch_size, model.num_classes).to(unlabeled_data.device)
 
-            logits_weak = model(weak_view)
-            logits_strong = model(strong_view)
-            probs = (torch.softmax(logits_weak/temperature, dim=1) + torch.softmax(logits_strong/temperature, dim=1)) / 2
+            for i in range(K):
+                weak_view = weak_aug(weak_view)
+                logits = model(weak_view)
+                probs = torch.softmax(logits, dim=1)
+                total_probs += 2 * (K - i + 1) / (K * (K + 1)) * probs
 
-            max_probs, pseudo_labels = torch.max(probs, dim=1)
-
-            # 类别平衡过滤（防止只选择特定类别）
-            class_counts = torch.bincount(pseudo_labels, minlength=probs.size(1))
-            class_weights = 1. / (class_counts + 1e-4)
-            sample_weights = class_weights[pseudo_labels]
-
-            # mask = (max_probs > threshold) & (sample_weights < torch.quantile(sample_weights, 0.9))
-            mask = (max_probs > threshold) & (sample_weights < torch.quantile(sample_weights, 0.95))
-
-            return pseudo_labels[mask], unlabeled_data[mask]
+            max_probs, pseudo_labels = torch.max(total_probs, dim=1)
+            mask = max_probs >= threshold
+            return pseudo_labels, mask
 
     @staticmethod
     def consistency_loss(logits1, logits2, method='KL'):

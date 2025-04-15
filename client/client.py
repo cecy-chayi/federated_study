@@ -27,27 +27,23 @@ class Client:
         # 高斯模糊（σ范围0.1-0.5）
         self.strong_aug = transforms.Compose([
             transforms.Lambda(lambda x: x.cpu()),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomResizedCrop(size=32, scale=(0.6, 1.0)),
-            transforms.ColorJitter(
-                brightness=0.4,
-                contrast=0.4,
-                saturation=0.4,
-                hue=0.1
+            transforms.RandAugment(
+                num_ops=3,  # 随机选择3个增强操作
+                magnitude=9,  # 增强强度设为9（范围0-10）
+                num_magnitude_bins=11,  # 默认的magnitude bins数量
+                interpolation=transforms.InterpolationMode.NEAREST
             ),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5)),
             transforms.Lambda(lambda x: x.to(self.device))
         ])
 
-    def train(self, global_model, epochs, lr=0.001):
+    def train(self, global_model, epochs, K, lr=0.001):
         model = copy.deepcopy(global_model).to(self.device)
         # L2正则防止客户端过拟合
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
         # 学习率递减
         # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: min(e / 5.0, 1.0))
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda e: min(e / epochs, 1.0))
         model.train()
 
         for epoch in range(epochs):
@@ -71,8 +67,10 @@ class Client:
                 if torch.any(unlabeled_mask):
                     unlabeled_images = images[unlabeled_mask]
                     with torch.no_grad():
+                        
                         pseudo_labels, filtered_data = SemiSupervised.generate_pseudo_labels(model,
                                                                                              unlabeled_images,
+                                                                                             K,
                                                                                              epoch=epoch,
                                                                                              total_epochs=epochs)
                         if filtered_data.size(0) > 0:
@@ -86,7 +84,8 @@ class Client:
                             loss_unsup = SemiSupervised.consistency_loss(logits_weak, logits_strong.detach())
 
                 # unsupervised_weight = 0.5 * (1 - epoch / epochs)
-                unsupervised_weight = 0.5 * (0.5 + 0.5 * (1 - epoch / epochs))
+                # unsupervised_weight = 0.5 * (0.5 + 0.5 * (1 - epoch / epochs))
+                unsupervised_weight = 0.5
                 total_loss = loss_sup + unsupervised_weight * loss_unsup
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
                 epoch_loss += total_loss.item()

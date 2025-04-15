@@ -3,3 +3,5 @@ num_rounds: 30
 local_epochs: 5
 batch_size: 64
 learning_rate: 0.00001
+data_folder: "./data/cifar10"
+test_folder: "./data/cifar10/test/data.pt"
