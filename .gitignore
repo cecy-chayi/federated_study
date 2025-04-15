@@ -1,2 +1,4 @@
 data/
 *.log
+.ignore
+__pycache__/
