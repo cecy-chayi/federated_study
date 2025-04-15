@@ -27,14 +27,14 @@ class Client:
         # 随机灰度化（20%概率）
         # 高斯模糊（σ范围0.1-0.5）
         self.strong_aug = transforms.Compose([
-            transforms.Lambda(lambda x: x.cpu()),
+            transforms.Lambda(lambda x: (x * 255).to(torch.uint8).cpu()),
             transforms.RandAugment(
                 num_ops=3,  # 随机选择3个增强操作
                 magnitude=9,  # 增强强度设为9（范围0-10）
                 num_magnitude_bins=11,  # 默认的magnitude bins数量
                 interpolation=transforms.InterpolationMode.NEAREST
             ),
-            transforms.Lambda(lambda x: x.to(self.device))
+            transforms.Lambda(lambda x: x.float().div(255).to(self.device))
         ])
 
     def train(self, global_model, epochs, num_classes, num_weak_aug_rounds, lr=0.001):
